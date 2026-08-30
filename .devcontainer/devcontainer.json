@@ -1,0 +1,34 @@
+{
+  "name": "jellyfin-azure (Terraform)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "runArgs": [
+    "--cap-add=SYS_ADMIN",
+    "--device=/dev/fuse",
+    "--security-opt",
+    "apparmor:unconfined"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "hashicorp.terraform",
+        "ms-azuretools.vscode-azurecontainerapps",
+        "ms-azuretools.vscode-docker",
+        "ms-vscode.azurecli",
+        "timonwong.shellcheck"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "[terraform]": {
+          "editor.defaultFormatter": "hashicorp.terraform",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  },
+  "remoteUser": "vscode"
+}

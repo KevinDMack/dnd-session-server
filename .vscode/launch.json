@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Terraform: plan (infra)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "terraform init && terraform plan",
+      "cwd": "${workspaceFolder}/infra"
+    },
+    {
+      "name": "Terraform: apply (infra)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "terraform init && terraform apply",
+      "cwd": "${workspaceFolder}/infra"
+    },
+    {
+      "name": "Jellyfin: run locally (docker compose)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "docker compose up --build",
+      "cwd": "${workspaceFolder}/app"
+    },
+    {
+      "name": "Jellyfin: follow container app logs",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "az containerapp logs show --name $(terraform -chdir=infra output -raw container_app_name) --resource-group $(terraform -chdir=infra output -raw resource_group_name) --follow",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
