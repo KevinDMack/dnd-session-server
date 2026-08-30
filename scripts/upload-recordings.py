@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -35,6 +36,16 @@ def require_positive_int(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{field} must be a positive integer")
     return value
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def add_text(parent: ET.Element, name: str, value: Any) -> None:
@@ -140,7 +151,6 @@ def upload(
     local_path: Path,
     blob_path: PurePosixPath,
     overwrite: bool,
-    dry_run: bool,
 ) -> None:
     command = [
         "az",
@@ -160,12 +170,49 @@ def upload(
         "--overwrite",
         str(overwrite).lower(),
         "--only-show-errors",
+        "--no-progress",
     ]
-    if dry_run:
-        print(f"Would upload {local_path} -> {blob_path}")
-        return
     subprocess.run(command, check=True)
-    print(f"Uploaded {blob_path}")
+
+
+def upload_all(
+    account: str,
+    container: str,
+    uploads: list[tuple[Path, PurePosixPath]],
+    overwrite: bool,
+    workers: int,
+    dry_run: bool,
+) -> None:
+    total = len(uploads)
+    if dry_run:
+        for completed, (local_path, blob_path) in enumerate(uploads, start=1):
+            print(f"[{completed}/{total}] Would upload {local_path} -> {blob_path}")
+        return
+
+    print(f"Uploading {total} files with up to {workers} parallel workers...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = {
+            executor.submit(
+                upload,
+                account,
+                container,
+                local_path,
+                blob_path,
+                overwrite,
+            ): blob_path
+            for local_path, blob_path in uploads
+        }
+        completed = 0
+        try:
+            for future in concurrent.futures.as_completed(pending):
+                blob_path = pending[future]
+                future.result()
+                completed += 1
+                print(f"[{completed}/{total}] Uploaded {blob_path}", flush=True)
+        except (OSError, subprocess.CalledProcessError):
+            for future in pending:
+                future.cancel()
+            raise
 
 
 def parse_args() -> argparse.Namespace:
@@ -185,6 +232,12 @@ def parse_args() -> argparse.Namespace:
         help="blob container (default: MEDIA_CONTAINER_NAME or media)",
     )
     parser.add_argument("--overwrite", action="store_true", help="replace existing blobs")
+    parser.add_argument(
+        "--workers",
+        type=positive_int,
+        default=4,
+        help="maximum parallel uploads (default: 4)",
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="validate and print without uploading"
     )
@@ -224,34 +277,23 @@ def main() -> int:
             temporary_dir = Path(temporary)
             series_nfo = temporary_dir / "tvshow.nfo"
             series_nfo.write_bytes(create_series_nfo(series))
-            upload(
-                args.account_name,
-                args.container_name,
-                series_nfo,
-                PurePosixPath(series_title, "tvshow.nfo"),
-                args.overwrite,
-                args.dry_run,
-            )
+            uploads = [
+                (series_nfo, PurePosixPath(series_title, "tvshow.nfo")),
+            ]
 
             for index, (video, video_blob, nfo, nfo_blob) in enumerate(planned):
                 episode_nfo = temporary_dir / f"episode-{index}.nfo"
                 episode_nfo.write_bytes(nfo)
-                upload(
-                    args.account_name,
-                    args.container_name,
-                    video,
-                    video_blob,
-                    args.overwrite,
-                    args.dry_run,
-                )
-                upload(
-                    args.account_name,
-                    args.container_name,
-                    episode_nfo,
-                    nfo_blob,
-                    args.overwrite,
-                    args.dry_run,
-                )
+                uploads.extend(((video, video_blob), (episode_nfo, nfo_blob)))
+
+            upload_all(
+                args.account_name,
+                args.container_name,
+                uploads,
+                args.overwrite,
+                args.workers,
+                args.dry_run,
+            )
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

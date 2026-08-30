@@ -108,9 +108,10 @@ python scripts/upload-recordings.py ./recordings ./recordings.json \
 The script uses the current Azure CLI login (`az login`) and creates a TV library layout:
 `<series>/Season <number>/S<number>E<number> - <title>.<extension>`. It uploads
 `tvshow.nfo` and episode NFO sidecars so Jellyfin can read the title, overview, dates,
-runtime, genres, and tags from the manifest. Use `--dry-run` to validate and preview all
-destinations, or `--overwrite` to replace blobs that already exist. After uploading, scan
-the Jellyfin library to load the new files.
+runtime, genres, and tags from the manifest. Four files upload in parallel by default, with
+a completed/total progress update after each file. Set the concurrency with `--workers`,
+use `--dry-run` to validate and preview all destinations, or use `--overwrite` to replace
+blobs that already exist. After uploading, scan the Jellyfin library to load the new files.
 
 FUSE requires `SYS_ADMIN` and `/dev/fuse`; both are configured for local runs in
 `app/docker-compose.yml`.
