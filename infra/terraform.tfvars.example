@@ -1,0 +1,17 @@
+# Example variable values. Copy to terraform.tfvars and edit.
+# terraform.tfvars is git ignored because it can contain environment specific data.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+name_prefix     = "dndjelly"
+location        = "eastus"
+
+# media_container_name  = "media"
+# config_share_name     = "jellyfin-config"
+# config_share_quota_gb = 100
+# container_image       = "jellyfin-blobfuse:latest"
+# cpu                   = 2
+# memory                = "4Gi"
+
+tags = {
+  workload = "jellyfin"
+}

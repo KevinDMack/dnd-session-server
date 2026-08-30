@@ -1,0 +1,89 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "terraform: init",
+      "type": "shell",
+      "command": "terraform init",
+      "options": {
+        "cwd": "${workspaceFolder}/infra"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "terraform: fmt",
+      "type": "shell",
+      "command": "terraform fmt -recursive",
+      "options": {
+        "cwd": "${workspaceFolder}/infra"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "terraform: validate",
+      "type": "shell",
+      "command": "terraform validate",
+      "options": {
+        "cwd": "${workspaceFolder}/infra"
+      },
+      "dependsOn": "terraform: init",
+      "problemMatcher": []
+    },
+    {
+      "label": "terraform: plan",
+      "type": "shell",
+      "command": "terraform plan -out=tfplan",
+      "options": {
+        "cwd": "${workspaceFolder}/infra"
+      },
+      "dependsOn": "terraform: init",
+      "problemMatcher": []
+    },
+    {
+      "label": "terraform: apply",
+      "type": "shell",
+      "command": "terraform apply tfplan",
+      "options": {
+        "cwd": "${workspaceFolder}/infra"
+      },
+      "dependsOn": "terraform: plan",
+      "problemMatcher": []
+    },
+    {
+      "label": "terraform: destroy",
+      "type": "shell",
+      "command": "terraform destroy",
+      "options": {
+        "cwd": "${workspaceFolder}/infra"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "acr: build jellyfin image",
+      "type": "shell",
+      "command": "az acr build --registry $(terraform -chdir=infra output -raw container_registry_name) --image jellyfin-blobfuse:latest ${workspaceFolder}/app",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "docker compose: up (local)",
+      "type": "shell",
+      "command": "docker compose up --build",
+      "options": {
+        "cwd": "${workspaceFolder}/app"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "shellcheck: scripts",
+      "type": "shell",
+      "command": "shellcheck scripts/*.sh app/entrypoint.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

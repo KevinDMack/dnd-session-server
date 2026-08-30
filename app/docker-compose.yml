@@ -1,0 +1,21 @@
+services:
+  jellyfin:
+    build:
+      context: .
+    image: jellyfin-blobfuse:latest
+    container_name: jellyfin
+    env_file:
+      - jellyfin.env
+    ports:
+      - "8096:8096"
+    # BlobFuse2 needs FUSE access inside the container.
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      # Locally /config is a bind mount; in Azure it is an Azure Files volume.
+      - ./.jellyfin-config:/config
+    restart: unless-stopped
