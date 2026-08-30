@@ -28,7 +28,9 @@ jellyfin-azure/
 │  └─ jellyfin.env.example
 ├─ scripts/
 │  ├─ mount-azure-files.sh     mount the /config share locally
-│  └─ create-azure-files-share.sh
+│  ├─ create-azure-files-share.sh
+│  ├─ upload-recordings.py     upload videos with Jellyfin metadata
+│  └─ recordings.example.json  metadata manifest example
 ├─ .devcontainer/              Terraform + Azure CLI + BlobFuse2 dev container
 │  ├─ devcontainer.json
 │  └─ Dockerfile
@@ -92,15 +94,24 @@ registry.
 `/media`) using `mode: msi` with the managed identity client ID supplied through
 `AZURE_CLIENT_ID`. Add `/media` as a library folder in the Jellyfin setup wizard.
 
-Upload recordings with, for example:
+Upload recordings and generate Jellyfin-compatible NFO metadata from a JSON manifest:
 
 ```bash
-az storage blob upload-batch \
+cp scripts/recordings.example.json recordings.json
+# Edit recordings.json so each "file" is relative to the local recordings folder.
+
+python scripts/upload-recordings.py ./recordings ./recordings.json \
   --account-name "$(terraform -chdir=infra output -raw storage_account_name)" \
-  --destination "$(terraform -chdir=infra output -raw media_container_name)" \
-  --source ./recordings \
-  --auth-mode login
+  --container-name "$(terraform -chdir=infra output -raw media_container_name)"
 ```
+
+The script uses the current Azure CLI login (`az login`) and creates a TV library layout:
+`<series>/Season <number>/S<number>E<number> - <title>.<extension>`. It uploads
+`tvshow.nfo` and episode NFO sidecars so Jellyfin can read the title, overview, dates,
+runtime, genres, and tags from the manifest. Four files upload in parallel by default, with
+a completed/total progress update after each file. Set the concurrency with `--workers`,
+use `--dry-run` to validate and preview all destinations, or use `--overwrite` to replace
+blobs that already exist. After uploading, scan the Jellyfin library to load the new files.
 
 FUSE requires `SYS_ADMIN` and `/dev/fuse`; both are configured for local runs in
 `app/docker-compose.yml`.
