@@ -7,9 +7,18 @@ recordings. **The recommended deployment is the Linux VM described below.**
 
 The independent Terraform root at `infra/vm/` uses an Ubuntu VM (East US,
 `Standard_B2s` by default), a persistent OS disk for Jellyfin configuration and
-accounts, and a separate 512 GiB Standard SSD managed disk for recordings. These
-are persistent block devices, not Azure temporary/resource disks. Jellyfin sees
-the recordings read-only. Cache and transcoding files are disposable.
+accounts, and an Azure Files SMB share for recordings (512 GiB quota by default).
+Only configuration/database storage needs persistent block storage: do not place
+Jellyfin's SQLite database on SMB/NFS. Jellyfin sees the recordings read-only.
+Cache and transcoding files remain on VM storage and are disposable.
+
+The host mounts Azure Files using a dedicated user-assigned managed identity,
+Azure Files SMB OAuth, and Microsoft's `azfilesauth` utility. There are no storage
+account keys or SAS tokens in the mount configuration. This is different from
+using managed identity to retrieve an account key. The managed identity needs the
+documented **Storage File Data SMB MI Admin** role; it has administrative file
+access, so this deployment uses a dedicated storage account rather than sharing
+one with unrelated workloads.
 
 Caddy provides HTTPS on port 443; Jellyfin's port 8096 is not publicly published.
 SSH requires your public key and is restricted to your administrator CIDR. Caddy
@@ -21,6 +30,11 @@ The VM uses the official Jellyfin image, not the legacy BlobFuse image.
 Use Terraform >= 1.9 and < 2.0, Azure CLI, an SSH key pair, and a domain whose DNS A record
 you control. Your subscription must allow the VM size in your selected region.
 Authenticate with `az login` and select your subscription before deployment.
+The deploying principal must be able to create storage, managed identities and
+role assignments as well as VMs and backup resources. Keep Terraform state and
+saved plans protected; keyless runtime authentication does not make state public.
+The VM must not be domain-joined. Managed-identity SMB requires Kerberos support
+in the storage account's SMB settings and reachability of IMDS and the share.
 
 From the repository directory:
 
@@ -50,13 +64,18 @@ key, then check bootstrap and startup:
 ```bash
 sudo cloud-init status --wait
 sudo systemctl --failed
-sudo lsblk -f
 sudo findmnt /srv/jellyfin/media
+sudo azfilesauthmanager list
+sudo systemctl status azfilesrefresh.service
 sudo docker ps
 ```
 
-Do not upload media or start Jellyfin if the media disk has not mounted. Disk
-initialization must not be repeated manually on an existing disk.
+Do not start Jellyfin if the SMB share has not mounted. The boot-time
+authentication service must obtain credentials before mounting, and
+`azfilesrefresh` renews them during operation. Initial RBAC propagation can delay
+startup; check the authentication and mount unit logs rather than falling back
+to account keys or creating an empty local media library. After reboot, confirm
+the mount is CIFS, refresh is running, and Jellyfin can read existing recordings.
 
 ### Player accounts and first login
 
@@ -88,31 +107,50 @@ streams. Prefer recordings that players' clients can play directly.
 
 ### Upload recordings
 
-Copy recordings over SSH to the VM's `/srv/jellyfin/media/` directory, using
-`sudo` to move files from the administrator's staging directory as necessary.
-Ensure directories are readable/traversable and files readable by Jellyfin.
-Then scan the library. Do not grant players filesystem access.
+Upload recordings and NFO sidecars to the Azure Files share using an authorized
+administrator's Azure Files client or AzCopy workflow. The VM mount is for
+playback; do not assume it permits uploads, and do not grant players storage
+RBAC or VM filesystem access. Preserve the library directory layout, then scan
+the Jellyfin library.
 
 The existing `scripts/upload-recordings.py` uploads to **Blob Storage only**; it
-does not populate the new managed disk. To migrate, download existing blobs using
-Azure CLI/AzCopy to staging, then copy the library and NFO sidecars onto the media
-disk. The new deployment does not require BlobFuse or SMB credentials.
+does not populate the file share. To migrate, download existing blobs using
+Azure CLI/AzCopy to staging, then upload the library and NFO sidecars to Azure
+Files. Your upload client's identity and network access are separate from the
+VM's managed identity; a storage firewall exception or a client in the allowed
+network may be necessary. Never open the share publicly to anonymous access.
+The Terraform outputs `media_storage_account_name`, `media_share_name` and
+`media_smb_path` identify the upload destination. The storage firewall permits the
+VM subnet through a service endpoint, plus trusted Azure services for backup;
+it is not an unrestricted public share.
 
 ### Backups, recovery and maintenance
 
-The VM deployment provisions Azure Backup with daily backups and retention,
-including the attached recordings disk, plus a monthly cost budget email alert.
+The deployment provisions daily Azure Backup protection for the VM and separate
+Azure Files share protection, plus a monthly cost budget email alert. **VM
+backups do not contain the mounted file share.**
+VM backups run at 03:00 UTC and share backups at 03:30 UTC; retention defaults
+to 30 days and is configurable from 7 to 200 days.
 Backup storage and protected-instance fees are additional to the estimates below.
 Budget alerts are notifications, **not a spending cap or automatic shutdown**.
 
-- After deployment, trigger an on-demand backup in the Recovery Services vault
-  and verify the job completes and includes both disks.
+Share recovery points are snapshots in the source LRS storage account, **not
+vaulted media copies**. The vault's geo-redundancy does not make those snapshots
+geo-redundant or protect them from deletion of the storage account. Azure Backup
+requires shared-key access to remain enabled on the account; the VM still uses
+only managed-identity OAuth, has no `listKeys` permissions, and receives no key.
+
+- After deployment, trigger on-demand VM and file-share backups in the Recovery
+  Services vault and verify both jobs complete. Confirm the share recovery
+  point exists, not just the OS disk recovery point.
 - For a strictly consistent SQLite backup, stop Jellyfin before making a
   configuration copy or taking a recovery point, then start it again. Do not
   assume a live file copy or crash-consistent snapshot is application-consistent.
-- Test recovery to an **isolated VM with no public ingress**: restore both OS
-  and data disks from the same recovery point using Azure Backup, attach the
-  media disk at LUN 0, and verify the mount before starting services.
+- Test recovery to an **isolated VM with no public ingress**: restore the OS
+  disk and independently restore the share to a compatible recovery point.
+  Reattach the correct user-assigned identity and confirm RBAC, network rules,
+  credential acquisition and the CIFS mount before starting services. Recovered
+  configuration must not accidentally point a test instance at production media.
 - Check administrator/player logins, playback progress, library metadata and
   representative recordings, then switch DNS only after verification. A restored
   VM may need network and backup protection reconfigured.
@@ -128,16 +166,15 @@ Budget alerts are notifications, **not a spending cap or automatic shutdown**.
 
 For maintenance, use `sudo systemctl stop jellyfin.service` and
 `sudo systemctl start jellyfin.service`. Both containers depend on the mounted
-media disk. Missing or unfamiliar disk layouts fail closed rather than writing
-recordings to the OS disk; after repairing a mount failure, reset failed units
-with `sudo systemctl reset-failed` before starting the services again. Filesystem
-growth after increasing the managed disk requires a separate, backed-up
-filesystem-resize operation; Terraform changes disk capacity only.
+share. Mount/authentication failures fail closed rather than serving an empty
+local directory; after repairing a mount failure, reset failed units with
+`sudo systemctl reset-failed` before starting the services again. Also test
+playback after credentials have renewed, not only immediately after boot.
 
-The managed media disk has a Terraform destruction guard. Do not remove it merely
-to make a plan succeed. Before intentionally removing resources, export and test
-backups, review Azure Backup soft-delete/retention behavior, and understand that
-an OS disk deletion also removes the live accounts and configuration.
+Before intentionally removing resources, export and test backups, review Azure
+Backup soft-delete/retention behavior, and understand that an OS disk deletion
+removes live accounts/configuration while a share deletion removes recordings.
+Do not remove destruction guards merely to make a plan succeed.
 
 ### Existing deployments: no automatic migration
 
@@ -149,6 +186,21 @@ before copying its SQLite database. Restore to a compatible Jellyfin version
 and follow Jellyfin's upgrade guidance. Remove old resources only after testing
 the replacement and reviewing their separate Terraform destroy plan.
 
+If you already applied the earlier **VM + managed media disk** version of this
+PR, do not apply this update blindly. Changing cloud-init requires VM replacement,
+which the OS/configuration destruction guard intentionally blocks. First back up
+configuration and recordings, migrate the media to Azure Files, and verify the
+copied files. Plan an explicit host migration (or carefully install the new
+bootstrap configuration on the existing VM). Retain the old media disk until
+both playback and recovery have been tested; removing its Terraform resource
+must never be treated as a data migration. An unmanaged retained disk continues
+to incur charges until you explicitly delete it.
+Terraform `removed` blocks deliberately forget both the old disk and its
+attachment **without destroying or detaching either**. When you are ready to
+retire the old disk, explicitly detach it from the old VM after migration and
+backup verification, then delete it separately. Review this alongside any planned
+VM replacement; do not assume the old attachment is managed by this root anymore.
+
 ## Monthly Azure cost comparison
 
 Planning assumptions: East US, USD pay-as-you-go, 730 hours/month, approximately
@@ -159,13 +211,14 @@ in the [Azure pricing calculator](https://azure.microsoft.com/en-us/pricing/calc
 | Option | Infrastructure/month, before extras | Assessment |
 | --- | ---: | --- |
 | App Service Linux B2 + Azure Files | $60–70 | Not implemented: media mounting is feasible, but shared persistent storage is unsuitable for Jellyfin's SQLite database. |
-| **B2s VM + managed disks** | **$70–85** | **Implemented in `infra/vm/`.** Persistent block storage for database and media. |
-| B2s VM + Azure Files media | $70–80 | Comparison only; keep the database on VM disk. Adds SMB setup and transaction charges. |
+| B2s VM + managed disks | $70–85 | Comparison only; the media disk has been replaced by Azure Files. |
+| **B2s VM + Azure Files media** | **$70–80** | **Implemented in `infra/vm/`.** Database stays on VM disk; media uses managed-identity SMB. |
 
-Allow roughly $30/month for B2s compute, $5–10 for OS/config storage, $30–40
-for a provisioned 512 GiB Standard SSD media disk, and $4 for public IPv4.
-The Azure Files comparison assumes $0.06/GiB-month plus transactions; confirm the
-selected tier rather than treating that rate as a quote.
+Allow roughly $30/month for B2s compute, $5–10 for OS/config storage, and $4 for
+public IPv4. The Azure Files estimate assumes $0.06/GiB-month (about $31 for
+512 GiB actually stored), plus transactions; confirm the selected tier and
+billing model rather than treating that rate as a quote. A share quota is a
+capacity limit, not necessarily the billed amount on pay-as-you-go tiers.
 
 All figures exclude backups, disk/storage transactions, outbound traffic, optional
 monitoring, domains and taxes. The implemented backups therefore make the actual
@@ -191,6 +244,9 @@ Sources: Azure [VMs](https://azure.microsoft.com/en-us/pricing/details/virtual-m
 [Files](https://azure.microsoft.com/en-us/pricing/details/storage/files/),
 [bandwidth](https://azure.microsoft.com/en-us/pricing/details/bandwidth/), and
 [Jellyfin storage guidance](https://jellyfin.org/docs/general/administration/storage/).
+Managed-identity mounting:
+[Microsoft Azure Files guide](https://learn.microsoft.com/en-us/azure/storage/files/files-managed-identities?pivots=linux)
+and [AzFilesAuthenticator](https://github.com/Azure/AzFilesAuthenticator).
 
 ## Legacy deployment (not recommended)
 
@@ -347,11 +403,13 @@ terraform -chdir=infra/vm init -backend=false
 terraform -chdir=infra/vm fmt -check
 terraform -chdir=infra/vm validate
 terraform -chdir=infra/vm test
-shellcheck infra/vm/storage-init.sh
-bash -n infra/vm/storage-init.sh
+shellcheck infra/vm/media-auth.sh infra/vm/install-azfilesauth.sh
+bash -n infra/vm/media-auth.sh
+bash -n infra/vm/install-azfilesauth.sh
 ```
 
-The mocked Terraform tests do not need Azure credentials. Terraform validation
+The mocked Terraform tests require Terraform >= 1.12 and do not need Azure
+credentials; deployment supports >= 1.9. Terraform validation
 and mocked plans do not deploy resources or prove that Azure bootstrap,
 certificate issuance, backup recovery, or player playback work. Perform the
 deployment acceptance checks above in your subscription.

@@ -39,7 +39,7 @@ variable "vm_size" {
 
 variable "admin_username" {
   type        = string
-  description = "SSH administrator; UID/GID 1000 also owns Jellyfin configuration and uploaded media."
+  description = "SSH administrator; UID/GID 1000 also owns Jellyfin configuration and reads mounted media."
   default     = "azureuser"
   validation {
     condition     = can(regex("^[a-z][a-z0-9_]{2,30}$", var.admin_username)) && !contains(["root", "admin"], var.admin_username)
@@ -84,13 +84,13 @@ variable "https_allowed_cidrs" {
   }
 }
 
-variable "media_disk_size_gb" {
+variable "media_share_quota_gb" {
   type        = number
-  description = "Persistent LUN 0 managed media disk size; may grow but cannot shrink."
+  description = "Azure Files SMB media share quota in GiB (pay-as-you-go HDD storage)."
   default     = 512
   validation {
-    condition     = var.media_disk_size_gb >= 32 && var.media_disk_size_gb <= 32767 && floor(var.media_disk_size_gb) == var.media_disk_size_gb
-    error_message = "Use an integer from 32 to 32767 GiB."
+    condition     = var.media_share_quota_gb >= 1 && var.media_share_quota_gb <= 5120 && floor(var.media_share_quota_gb) == var.media_share_quota_gb
+    error_message = "Use an integer from 1 to 5120 GiB."
   }
 }
 
@@ -106,11 +106,11 @@ variable "os_disk_size_gb" {
 
 variable "backup_retention_days" {
   type        = number
-  description = "Daily VM backup retention, including OS disk and media LUN 0; UTC 03:00 schedule."
+  description = "Daily OS VM backup (UTC 03:00) and separate media share snapshot backup (UTC 03:30) retention."
   default     = 30
   validation {
-    condition     = var.backup_retention_days >= 7 && var.backup_retention_days <= 9999 && floor(var.backup_retention_days) == var.backup_retention_days
-    error_message = "Use an integer from 7 to 9999 days."
+    condition     = var.backup_retention_days >= 7 && var.backup_retention_days <= 200 && floor(var.backup_retention_days) == var.backup_retention_days
+    error_message = "Use an integer from 7 to 200 days (Azure Files snapshot limit)."
   }
 }
 

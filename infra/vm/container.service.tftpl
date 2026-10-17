@@ -11,7 +11,6 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStartPre=/usr/bin/mountpoint --quiet /srv/jellyfin/media
 %{ if name == "jellyfin" ~}
-ExecStartPre=/usr/bin/chown 1000:1000 /srv/jellyfin/media
 ExecStartPre=/usr/bin/install -d -o 1000 -g 1000 -m 0755 /var/cache/jellyfin
 %{ endif ~}
 ExecStartPre=-/usr/bin/docker rm --force ${name}

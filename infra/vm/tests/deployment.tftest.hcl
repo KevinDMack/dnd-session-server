@@ -1,4 +1,22 @@
-mock_provider "azurerm" {}
+# Run tests with Terraform >= 1.12 for plan-time mocks (deployment needs >= 1.9).
+mock_provider "azurerm" {
+  mock_resource "azurerm_user_assigned_identity" {
+    override_during = plan
+    defaults = {
+      id           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/jellyfin-vm-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/jellyfin-media"
+      client_id    = "11111111-1111-1111-1111-111111111111"
+      principal_id = "22222222-2222-2222-2222-222222222222"
+    }
+  }
+}
+
+mock_provider "azapi" {
+  mock_resource "azapi_resource" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/jellyfin-vm-rg/providers/Microsoft.Storage/storageAccounts/jftest"
+    }
+  }
+}
 
 variables {
   subscription_id       = "00000000-0000-0000-0000-000000000000"
@@ -17,16 +35,16 @@ run "production_defaults" {
     error_message = "Expected the economical East US VM defaults."
   }
   assert {
-    condition     = azurerm_linux_virtual_machine.jellyfin.disable_password_authentication && length(azurerm_linux_virtual_machine.jellyfin.identity) == 0
-    error_message = "VM must use key-only SSH without an unnecessary managed identity."
+    condition     = azurerm_linux_virtual_machine.jellyfin.disable_password_authentication && azurerm_linux_virtual_machine.jellyfin.identity[0].type == "UserAssigned" && azurerm_role_assignment.media.role_definition_name == "Storage File Data SMB MI Admin"
+    error_message = "VM must use key-only SSH and a dedicated identity with SMB OAuth data access."
   }
   assert {
-    condition     = azurerm_managed_disk.media.disk_size_gb == 512 && azurerm_virtual_machine_data_disk_attachment.media.lun == 0
-    error_message = "Expected a persistent 512 GiB media disk at LUN 0."
+    condition     = azurerm_storage_share.media.quota == 512 && azurerm_storage_share.media.access_tier == "Hot" && azurerm_storage_share.media.enabled_protocol == "SMB" && azapi_resource.media.body.properties.azureFilesIdentityBasedAuthentication.smbOAuthSettings.isSmbOAuthEnabled && azapi_resource.media.body.properties.azureFilesIdentityBasedAuthentication.directoryServiceOptions == "None"
+    error_message = "Expected a 512 GiB Hot SMB share with genuine managed identity OAuth enabled."
   }
   assert {
-    condition     = azurerm_recovery_services_vault.jellyfin.soft_delete_enabled && azurerm_backup_policy_vm.jellyfin.backup[0].frequency == "Daily" && azurerm_backup_policy_vm.jellyfin.retention_daily[0].count == 30 && azurerm_backup_protected_vm.jellyfin.include_disk_luns == toset([0])
-    error_message = "Daily backups must retain 30 days and include the media disk."
+    condition     = azurerm_recovery_services_vault.jellyfin.soft_delete_enabled && azurerm_backup_policy_vm.jellyfin.backup[0].frequency == "Daily" && azurerm_backup_policy_vm.jellyfin.retention_daily[0].count == 30 && azurerm_backup_policy_file_share.media.retention_daily[0].count == 30 && azurerm_backup_protected_file_share.media.source_file_share_name == azurerm_storage_share.media.name
+    error_message = "Daily backups must protect OS/config and separately the SMB share for 30 days."
   }
   assert {
     condition     = local.https_cidrs == tolist(["203.0.113.10/32"])
@@ -49,12 +67,32 @@ run "production_defaults" {
     error_message = "Jellyfin must bind only to loopback and have read-only media."
   }
   assert {
-    condition     = length(yamldecode(local.cloud_init).write_files) == 7 && alltrue([for entry in yamldecode(local.cloud_init).write_files : entry.encoding == "b64" && can(base64decode(entry.content))])
+    condition     = length(yamldecode(local.cloud_init).write_files) == 8 && alltrue([for entry in yamldecode(local.cloud_init).write_files : entry.encoding == "b64" && can(base64decode(entry.content))])
     error_message = "Cloud-init must render valid YAML with base64-encoded file contents."
   }
   assert {
     condition     = strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/caddy/Caddyfile"])), "@allowed remote_ip 203.0.113.10/32") && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/caddy/Caddyfile"])), "disable_http_challenge")
     error_message = "Caddy must enforce the allowlist and use TLS-ALPN, not HTTP ACME."
+  }
+  assert {
+    condition     = azapi_resource.media.body.properties.networkAcls.defaultAction == "Deny" && azapi_resource.media.body.properties.networkAcls.bypass == "AzureServices" && length(azapi_resource.media.body.properties.networkAcls.virtualNetworkRules) == 1 && length(azapi_resource.media.body.properties.networkAcls.ipRules) == 0 && contains(azurerm_subnet.jellyfin.service_endpoints, "Microsoft.Storage")
+    error_message = "The share must allow only the VM subnet and trusted backup services."
+  }
+  assert {
+    condition     = azapi_resource.media.body.properties.allowSharedKeyAccess && length(azapi_resource.media.response_export_values) == 0
+    error_message = "Azure Backup requires Shared Key enabled, but account responses must not export keys into state."
+  }
+  assert {
+    condition     = strcontains(file("${path.module}/media.mount.tftpl"), "ro,username=") && strcontains(file("${path.module}/media.mount.tftpl"), "sec=krb5,cruid=azfilesuser") && strcontains(file("${path.module}/media.mount.tftpl"), "vers=3.1.1,seal") && strcontains(file("${path.module}/media-auth.sh"), "--imds-client-id") && strcontains(file("${path.module}/media-auth.sh"), "attempt <= 60") && strcontains(file("${path.module}/media-auth.sh"), "mount -t cifs")
+    error_message = "Media must use encrypted read-only SMB, package-owned credentials, and retried IMDS OAuth bootstrap."
+  }
+  assert {
+    condition     = strcontains(file("${path.module}/install-azfilesauth.sh"), "enable --now azfilesrefresh.service") && strcontains(file("${path.module}/media.mount.tftpl"), "Requires=jellyfin-media-auth.service") && strcontains(file("${path.module}/container.service.tftpl"), "BindsTo=srv-jellyfin-media.mount") && !strcontains(file("${path.module}/container.service.tftpl"), "chown 1000:1000 /srv/jellyfin/media")
+    error_message = "Reboot authentication, renewal and fail-closed mount ordering are required; never chown the SMB root."
+  }
+  assert {
+    condition     = alltrue([for entry in yamldecode(local.cloud_init).write_files : !strcontains(lower(base64decode(entry.content)), "listkeys") && !strcontains(base64decode(entry.content), "credentials=") && !strcontains(base64decode(entry.content), "password=")])
+    error_message = "Cloud-init and authentication must not fetch or embed storage account credentials."
   }
 }
 
@@ -101,12 +139,20 @@ run "reject_empty_https_allowlist" {
   expect_failures = [var.https_allowed_cidrs]
 }
 
-run "reject_fractional_disk" {
+run "reject_fractional_share_quota" {
   command = plan
   variables {
-    media_disk_size_gb = 512.5
+    media_share_quota_gb = 512.5
   }
-  expect_failures = [var.media_disk_size_gb]
+  expect_failures = [var.media_share_quota_gb]
+}
+
+run "reject_excessive_share_backup_retention" {
+  command = plan
+  variables {
+    backup_retention_days = 201
+  }
+  expect_failures = [var.backup_retention_days]
 }
 
 run "reject_unstable_budget_date" {

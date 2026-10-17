@@ -41,3 +41,20 @@ output "https_allowed_cidrs" {
   description = "Application allowlist enforced by Caddy; public 443 is still open for ACME."
   value       = local.https_cidrs
 }
+
+output "media_storage_account_name" {
+  value = azapi_resource.media.name
+}
+
+output "media_share_name" {
+  value = azurerm_storage_share.media.name
+}
+
+output "media_smb_path" {
+  value = "//${local.media_endpoint}/${azurerm_storage_share.media.name}"
+}
+
+output "media_identity_client_id" {
+  description = "Public client ID used by azfilesauthmanager; not a secret."
+  value       = azurerm_user_assigned_identity.media.client_id
+}

@@ -15,27 +15,41 @@ locals {
   }
   cloud_init = "#cloud-config\n${yamlencode({
     package_update = true
-    packages       = ["docker.io", "e2fsprogs", "util-linux"]
+    packages       = ["docker.io", "cifs-utils", "curl", "util-linux"]
     ssh_pwauth     = false
     disable_root   = true
     write_files = concat([
       {
-        path        = "/usr/local/sbin/jellyfin-storage-init"
+        path        = "/usr/local/sbin/jellyfin-media-auth"
         permissions = "0755"
         encoding    = "b64"
-        content     = filebase64("${path.module}/storage-init.sh")
+        content     = filebase64("${path.module}/media-auth.sh")
       },
       {
-        path        = "/etc/systemd/system/jellyfin-storage-init.service"
+        path        = "/usr/local/sbin/jellyfin-install-azfilesauth"
+        permissions = "0755"
+        encoding    = "b64"
+        content     = filebase64("${path.module}/install-azfilesauth.sh")
+      },
+      {
+        path        = "/etc/systemd/system/jellyfin-media-auth.service"
         permissions = "0644"
         encoding    = "b64"
-        content     = filebase64("${path.module}/storage-init.service")
+        content = base64encode(templatefile("${path.module}/media-auth.service.tftpl", {
+          endpoint  = local.media_endpoint
+          client_id = azurerm_user_assigned_identity.media.client_id
+          share     = azurerm_storage_share.media.name
+        }))
       },
       {
         path        = "/etc/systemd/system/srv-jellyfin-media.mount"
         permissions = "0644"
         encoding    = "b64"
-        content     = filebase64("${path.module}/media.mount")
+        content = base64encode(templatefile("${path.module}/media.mount.tftpl", {
+          endpoint  = local.media_endpoint
+          share     = azurerm_storage_share.media.name
+          client_id = azurerm_user_assigned_identity.media.client_id
+        }))
       },
       {
         path        = "/etc/caddy/Caddyfile"
@@ -65,6 +79,7 @@ locals {
     runcmd = [
       ["install", "-d", "-m", "0755", "/srv/jellyfin/media", "/srv/jellyfin/config", "/var/cache/jellyfin", "/srv/caddy/data", "/srv/caddy/config"],
       ["chown", "1000:1000", "/srv/jellyfin/config", "/var/cache/jellyfin"],
+      ["/usr/local/sbin/jellyfin-install-azfilesauth"],
       ["systemctl", "daemon-reload"],
       ["systemctl", "enable", "--now", "docker.service"],
       ["systemctl", "enable", "--now", "jellyfin.service", "caddy.service"],

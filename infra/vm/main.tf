@@ -15,6 +15,7 @@ resource "azurerm_subnet" "jellyfin" {
   resource_group_name  = azurerm_resource_group.jellyfin.name
   virtual_network_name = azurerm_virtual_network.jellyfin.name
   address_prefixes     = ["10.42.1.0/24"]
+  service_endpoints    = ["Microsoft.Storage"]
 }
 
 resource "azurerm_public_ip" "jellyfin" {
@@ -99,6 +100,11 @@ resource "azurerm_linux_virtual_machine" "jellyfin" {
   provision_vm_agent              = true
   allow_extension_operations      = true
 
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.media.id]
+  }
+
   admin_ssh_key {
     username   = var.admin_username
     public_key = var.ssh_public_key
@@ -123,27 +129,27 @@ resource "azurerm_linux_virtual_machine" "jellyfin" {
     prevent_destroy = true
   }
 
-  depends_on = [azurerm_network_interface_security_group_association.jellyfin]
+  depends_on = [
+    azurerm_network_interface_security_group_association.jellyfin,
+    azurerm_role_assignment.media,
+    azurerm_storage_share.media,
+  ]
 }
 
-resource "azurerm_managed_disk" "media" {
-  name                 = "${var.name_prefix}-media"
-  location             = azurerm_resource_group.jellyfin.location
-  resource_group_name  = azurerm_resource_group.jellyfin.name
-  storage_account_type = "StandardSSD_LRS"
-  create_option        = "Empty"
-  disk_size_gb         = var.media_disk_size_gb
-
+# Retain pre-migration disks and attachments. Operators must snapshot/copy data
+# and detach explicitly; changing this module must never delete the old media.
+removed {
+  from = azurerm_managed_disk.media
   lifecycle {
-    prevent_destroy = true
+    destroy = false
   }
 }
 
-resource "azurerm_virtual_machine_data_disk_attachment" "media" {
-  managed_disk_id    = azurerm_managed_disk.media.id
-  virtual_machine_id = azurerm_linux_virtual_machine.jellyfin.id
-  lun                = 0
-  caching            = "None"
+removed {
+  from = azurerm_virtual_machine_data_disk_attachment.media
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "azurerm_recovery_services_vault" "jellyfin" {
@@ -180,9 +186,6 @@ resource "azurerm_backup_protected_vm" "jellyfin" {
   recovery_vault_name = azurerm_recovery_services_vault.jellyfin.name
   source_vm_id        = azurerm_linux_virtual_machine.jellyfin.id
   backup_policy_id    = azurerm_backup_policy_vm.jellyfin.id
-  include_disk_luns   = [0]
-
-  depends_on = [azurerm_virtual_machine_data_disk_attachment.media]
 }
 
 resource "azurerm_consumption_budget_resource_group" "jellyfin" {

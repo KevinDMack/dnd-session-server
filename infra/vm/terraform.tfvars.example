@@ -12,7 +12,7 @@ budget_contact_emails = ["you@example.com"]
 budget_start_date     = "2026-10-01T00:00:00Z"
 monthly_budget_amount = 100
 backup_retention_days = 30
-media_disk_size_gb    = 512
+media_share_quota_gb  = 512
 os_disk_size_gb       = 64
 
 # Null defaults to administrator_cidr, protecting the first-run setup wizard.
