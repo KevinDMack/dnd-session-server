@@ -2,6 +2,45 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "vm: init",
+      "type": "shell",
+      "command": "terraform init",
+      "options": {
+        "cwd": "${workspaceFolder}/infra/vm"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "vm: validate",
+      "type": "shell",
+      "command": "terraform fmt -check && terraform validate",
+      "options": {
+        "cwd": "${workspaceFolder}/infra/vm"
+      },
+      "dependsOn": "vm: init",
+      "problemMatcher": []
+    },
+    {
+      "label": "vm: plan",
+      "type": "shell",
+      "command": "terraform plan -out=tfplan",
+      "options": {
+        "cwd": "${workspaceFolder}/infra/vm"
+      },
+      "dependsOn": "vm: validate",
+      "problemMatcher": []
+    },
+    {
+      "label": "vm: apply",
+      "type": "shell",
+      "command": "terraform apply tfplan",
+      "options": {
+        "cwd": "${workspaceFolder}/infra/vm"
+      },
+      "dependsOn": "vm: plan",
+      "problemMatcher": []
+    },
+    {
       "label": "terraform: init",
       "type": "shell",
       "command": "terraform init",
