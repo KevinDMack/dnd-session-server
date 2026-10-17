@@ -12,13 +12,13 @@ are persistent block devices, not Azure temporary/resource disks. Jellyfin sees
 the recordings read-only. Cache and transcoding files are disposable.
 
 Caddy provides HTTPS on port 443; Jellyfin's port 8096 is not publicly published.
-SSH requires your public key and is restricted to your administrator CIDR. HTTPS
-is initially restricted too, so another visitor cannot claim the setup wizard.
+SSH requires your public key and is restricted to your administrator CIDR. Caddy
+initially restricts application requests too, so another visitor cannot claim the setup wizard.
 The VM uses the official Jellyfin image, not the legacy BlobFuse image.
 
 ### Deploy
 
-Use Terraform >= 1.5, Azure CLI, an SSH key pair, and a domain whose DNS A record
+Use Terraform >= 1.9 and < 2.0, Azure CLI, an SSH key pair, and a domain whose DNS A record
 you control. Your subscription must allow the VM size in your selected region.
 Authenticate with `az login` and select your subscription before deployment.
 
@@ -39,8 +39,10 @@ terraform -chdir=infra/vm output
 Set the domain's A record to the output public IP; remove any conflicting AAAA
 record. Certificate issuance needs working public DNS and outbound internet.
 Caddy uses TLS-ALPN validation on 443, not an HTTP challenge on port 80. Keep port
-80 closed. Follow the certificate-validation network instructions in the example
-variables before expecting a certificate.
+80 closed. The network security group permits public TCP 443 so certificate
+validators can connect; Caddy's application allowlist returns 403 for other clients.
+Do not restrict that network rule to your own address or certificate issuance
+and renewal will fail.
 
 SSH to the output public IP using your configured administrator user and private
 key, then check bootstrap and startup:
@@ -58,9 +60,8 @@ initialization must not be repeated manually on an existing disk.
 
 ### Player accounts and first login
 
-1. Keep HTTPS restricted to your administrator address until setup is complete.
-   If certificate issuance requires temporarily public 443, keep Caddy/Jellyfin
-   access restricted as described in the deployment configuration.
+1. Keep Caddy's application allowlist restricted to your administrator address
+   until setup is complete. Leave TCP 443 publicly reachable for certificates.
 2. Open the output HTTPS URL, create a strong administrator password, and add
    `/media` as the Jellyfin library directory.
 3. Create one **non-administrator** Jellyfin account per player. Grant only the
@@ -68,8 +69,18 @@ initialization must not be repeated manually on an existing disk.
    There are no per-user Jellyfin licence charges.
 4. Configure Jellyfin's known reverse proxy to trust only the actual Caddy proxy
    address/network, not arbitrary client-supplied forwarding headers.
-5. After setup, expand `https_allowed_cidrs` to the players' addresses, or to
-   `["0.0.0.0/0"]` for public HTTPS, and apply Terraform again. Never broaden SSH.
+5. After setup, use `sudoedit /etc/caddy/Caddyfile` on the VM to extend the
+   `@allowed remote_ip` list to the players' CIDRs, or `0.0.0.0/0` for public
+   application access. Run `sudo systemctl restart caddy.service` and confirm
+   player access. Never broaden SSH.
+
+`https_allowed_cidrs` is the **initial bootstrap** allowlist, not a live update
+mechanism. Changing it, the SSH administrator CIDR, or other inputs embedded in
+cloud-init changes VM `custom_data`, which requires replacement. Terraform's VM
+destruction guard blocks that replacement to protect accounts and certificates.
+For an existing VM, maintain Caddy's runtime allowlist over SSH; leave its
+bootstrap input unchanged. Review replacement plans carefully rather than
+disabling the guard to make ordinary configuration changes.
 
 There is one stateful Jellyfin instance, not a replica set. B2s is a starting
 point for direct play; CPU credits and software transcoding can limit concurrent
@@ -110,6 +121,18 @@ Budget alerts are notifications, **not a spending cap or automatic shutdown**.
 - Keep Ubuntu security updates and container images current. Back up first,
   deliberately update pinned image versions, and check their release notes.
   Terraform bootstrap is not an in-place container upgrade mechanism.
+  Container commands and immutable image references are in
+  `/etc/systemd/system/jellyfin.service` and `/etc/systemd/system/caddy.service`;
+  after editing them, use `sudo systemctl daemon-reload` and restart the affected
+  service. Do not add Docker restart policies that bypass mount ordering.
+
+For maintenance, use `sudo systemctl stop jellyfin.service` and
+`sudo systemctl start jellyfin.service`. Both containers depend on the mounted
+media disk. Missing or unfamiliar disk layouts fail closed rather than writing
+recordings to the OS disk; after repairing a mount failure, reset failed units
+with `sudo systemctl reset-failed` before starting the services again. Filesystem
+growth after increasing the managed disk requires a separate, backed-up
+filesystem-resize operation; Terraform changes disk capacity only.
 
 The managed media disk has a Terraform destruction guard. Do not remove it merely
 to make a plan succeed. Before intentionally removing resources, export and test
@@ -185,7 +208,7 @@ The original architecture is:
   **Azure Files** share mounted as a Container Apps volume, so state survives restarts and
   new revisions.
 
-## Repository structure
+### Legacy repository structure
 
 ```
 jellyfin-azure/
@@ -213,7 +236,7 @@ jellyfin-azure/
 └─ README.md
 ```
 
-## Getting started
+### Legacy getting started (reference only)
 
 1. Open the repository in VS Code and **Reopen in Container**. The dev container ships with
    Terraform, the Azure CLI, BlobFuse2, `cifs-utils`, `jq` and `shellcheck`.
@@ -244,7 +267,7 @@ jellyfin-azure/
 Equivalent VS Code tasks (`Terminal → Run Task`) and launch configurations are provided in
 `.vscode/`.
 
-## What Terraform creates
+### What legacy Terraform creates
 
 | Resource | Purpose |
 | --- | --- |
@@ -260,7 +283,7 @@ The identity is granted `Storage Blob Data Contributor` and
 `Storage File Data SMB Share Contributor` on the storage account, and `AcrPull` on the
 registry.
 
-## Media storage
+### Legacy media storage
 
 `app/entrypoint.sh` generates a BlobFuse2 configuration at start-up and mounts
 `https://<account>.blob.core.windows.net/<container>` at `MEDIA_MOUNT_PATH` (default
@@ -289,7 +312,7 @@ blobs that already exist. After uploading, scan the Jellyfin library to load the
 FUSE requires `SYS_ADMIN` and `/dev/fuse`; both are configured for local runs in
 `app/docker-compose.yml`.
 
-## Configuration storage
+### Legacy configuration storage
 
 The `/config` volume is the Azure Files share created by Terraform. Inspect or seed it from
 the dev container:
@@ -303,7 +326,7 @@ sudo -E ./scripts/mount-azure-files.sh \
 `scripts/create-azure-files-share.sh` recreates the share (and the blob container) outside
 of Terraform when needed.
 
-## Running locally
+### Legacy local development
 
 ```bash
 cd app
@@ -315,7 +338,25 @@ Local runs authenticate to Azure with whatever identity is available to the cont
 `STORAGE_ACCOUNT_NAME`/`MEDIA_CONTAINER_NAME` are left empty the BlobFuse2 mount is skipped
 and Jellyfin starts with local storage only.
 
-## Checks
+## Validation
+
+For the recommended VM deployment:
+
+```bash
+terraform -chdir=infra/vm init -backend=false
+terraform -chdir=infra/vm fmt -check
+terraform -chdir=infra/vm validate
+terraform -chdir=infra/vm test
+shellcheck infra/vm/storage-init.sh
+bash -n infra/vm/storage-init.sh
+```
+
+The mocked Terraform tests do not need Azure credentials. Terraform validation
+and mocked plans do not deploy resources or prove that Azure bootstrap,
+certificate issuance, backup recovery, or player playback work. Perform the
+deployment acceptance checks above in your subscription.
+
+For the unchanged legacy deployment:
 
 ```bash
 terraform -chdir=infra fmt -check -recursive

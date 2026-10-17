@@ -1,0 +1,28 @@
+[Unit]
+Description=${name} container
+Wants=network-online.target
+Requires=docker.service
+After=docker.service network-online.target srv-jellyfin-media.mount
+RequiresMountsFor=/srv/jellyfin/media
+BindsTo=srv-jellyfin-media.mount docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mountpoint --quiet /srv/jellyfin/media
+%{ if name == "jellyfin" ~}
+ExecStartPre=/usr/bin/chown 1000:1000 /srv/jellyfin/media
+ExecStartPre=/usr/bin/install -d -o 1000 -g 1000 -m 0755 /var/cache/jellyfin
+%{ endif ~}
+ExecStartPre=-/usr/bin/docker rm --force ${name}
+ExecStartPre=/usr/bin/docker pull ${image}
+ExecStart=/usr/bin/docker run --name ${name} --restart=no --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 ${args} ${image}
+ExecStop=-/usr/bin/docker stop --time 30 ${name}
+ExecStopPost=-/usr/bin/docker rm --force ${name}
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=900
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
