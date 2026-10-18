@@ -107,11 +107,107 @@ streams. Prefer recordings that players' clients can play directly.
 
 ### Upload recordings
 
+For the recommended VM deployment, upload videos to **Azure Files**, not through
+Jellyfin's web interface. Jellyfin reads the share at `/media`.
+
+#### Organize recordings as a series
+
+Use one folder per campaign, season subfolders, and numbered episodes:
+
+```text
+D&D Campaign/
+├── tvshow.nfo
+├── poster.jpg                         # optional series artwork
+└── Season 01/
+    ├── S01E01 - The Adventure Begins.mp4
+    ├── S01E01 - The Adventure Begins.nfo
+    ├── S01E02 - Trouble at the Inn.mp4
+    └── S01E02 - Trouble at the Inn.nfo
+```
+
+Keep episode numbers unique within each season. Each episode's NFO filename
+must match its video filename, except for the extension.
+
+#### Provide series and episode metadata
+
+NFO files are UTF-8 XML sidecars stored alongside the videos. Use `tvshow.nfo`
+with a `tvshow` root element for campaign information:
+
+| Information | NFO field |
+| --- | --- |
+| Campaign/series name | `title` |
+| Campaign description | `plot` |
+| Starting year | `year` |
+| Categories | `genre` |
+| Searchable labels | `tag` |
+
+For example:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<tvshow>
+  <title>D&amp;D Campaign</title>
+  <plot>A group of adventurers explores a forgotten kingdom.</plot>
+  <year>2026</year>
+  <genre>Tabletop RPG</genre>
+  <tag>D&amp;D</tag>
+</tvshow>
+```
+
+Use an `episodedetails` root element in each episode's matching `.nfo` file:
+
+| Information | NFO field |
+| --- | --- |
+| Episode title | `title` |
+| Session summary | `plot` |
+| Season number | `season` |
+| Episode number | `episode` |
+| Session date, formatted YYYY-MM-DD | `aired` |
+| Duration in minutes | `runtime` |
+
+For `S01E01 - The Adventure Begins.nfo`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<episodedetails>
+  <title>The Adventure Begins</title>
+  <plot>The party meets at an inn and accepts its first quest.</plot>
+  <season>1</season>
+  <episode>1</episode>
+  <aired>2026-10-17</aired>
+  <runtime>180</runtime>
+</episodedetails>
+```
+
+Keep the NFO season and episode numbers consistent with the video filename.
+Escape XML special characters in text, such as `&amp;` for an ampersand and
+`&lt;` for a less-than sign. Repeat `genre` or `tag` elements for multiple values.
+Disable online metadata providers for this private library so Jellyfin does not
+mistake the campaign for a commercial TV show.
+
+#### Upload to Azure Files
+
 Upload recordings and NFO sidecars to the Azure Files share using an authorized
 administrator's Azure Files client or AzCopy workflow. The VM mount is for
-playback; do not assume it permits uploads, and do not grant players storage
-RBAC or VM filesystem access. Preserve the library directory layout, then scan
-the Jellyfin library.
+read-only playback, not uploads; do not grant players storage RBAC or VM
+filesystem access.
+
+1. Read the `media_storage_account_name`, `media_share_name`, and `media_smb_path`
+   outputs from the VM Terraform deployment to identify the destination:
+
+   ```bash
+   terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/vm output
+   ```
+
+   Substitute your local checkout path if running outside this environment.
+2. Configure an authorized Azure Files client or AzCopy workflow with write
+   permission to that share and network access through its storage firewall.
+   The VM's managed identity does not automatically authorize your upload client.
+3. Upload the campaign folder into the share root, preserving its directory
+   structure. Upload videos, NFO sidecars, and optional artwork together; the
+   example above should appear as `/media/D&D Campaign/` inside Jellyfin.
+4. Wait for all uploads to finish before scanning the library. Avoid scanning
+   while a video is only partially uploaded.
 
 The existing `scripts/upload-recordings.py` uploads to **Blob Storage only**; it
 does not populate the file share. To migrate, download existing blobs using
@@ -123,6 +219,140 @@ The Terraform outputs `media_storage_account_name`, `media_share_name` and
 `media_smb_path` identify the upload destination. The storage firewall permits the
 VM subnet through a service endpoint, plus trusted Azure services for backup;
 it is not an unrestricted public share.
+
+#### Create series and upload episodes from your computer
+
+Run these commands **outside the VM**, on the computer holding your recordings.
+`create-series.py` creates a campaign folder and `tvshow.nfo` directly in Azure
+Files; `upload-episode.py` uploads a local video into an existing campaign and
+generates its episode NFO. Jellyfin sees the new files through its existing
+read-only mount. No SSH, local SMB mount, sudo, storage keys, or VM changes are
+needed.
+
+Prerequisites:
+
+- Python 3.10+ and Azure CLI installed on the upload computer. No pip packages
+  are required. Use a current CLI that supports `--auth-mode login` and
+  `--enable-file-backup-request-intent` for `az storage file` and
+  `az storage directory` commands.
+- Sign in using `az login` and select the deployment's subscription with
+  `az account set --subscription <subscription-id>`.
+- Have an administrator grant your uploading identity **Storage File Data
+  Privileged Contributor**, scoped to the target share where possible.
+  These commands use the Azure Files REST API with OAuth backup intent, which
+  requires privileged file data actions; ordinary SMB Share Contributor,
+  subscription Contributor, or the VM's managed-identity assignment does not
+  automatically grant your login this access. This role bypasses file ACL checks:
+  grant it only to trusted upload administrators, not players.
+- Your upload computer must have HTTPS access to the storage account through
+  its firewall. The default configuration permits the VM subnet, not arbitrary
+  home computers. Use an authorized network path or ask the storage administrator
+  to allow your specific public IP according to your infrastructure policy.
+  Authentication alone does not bypass the firewall; do not open access to all
+  networks.
+
+Read the VM deployment outputs `media_storage_account_name` and `media_share_name`
+and supply them explicitly. The share defaults to `media` if omitted. The
+examples below use this environment's absolute checkout path; substitute your
+own local checkout and recording paths.
+
+Create a series, repeating `--genre` and `--tag` as needed:
+
+```bash
+python3 /home/runner/work/dnd-session-server/dnd-session-server/scripts/create-series.py \
+  "D&D Campaign" --account-name <storage-account> --share-name media \
+  --overview "Adventurers explore a forgotten kingdom." \
+  --year 2026 --genre "Tabletop RPG" --tag "D&D"
+```
+
+Upload an episode using the exact existing series folder name:
+
+```bash
+python3 /home/runner/work/dnd-session-server/dnd-session-server/scripts/upload-episode.py \
+  "D&D Campaign" /path/to/recordings/session-01.mp4 \
+  --account-name <storage-account> --share-name media \
+  --title "The Adventure Begins" --season 1 --episode 1 \
+  --overview "The party meets at an inn and accepts its first quest." \
+  --date 2026-10-17 --runtime-minutes 180 --tag "session"
+```
+
+Replace `<storage-account>` before running the commands. This creates
+`D&D Campaign/Season 01/S01E01 - The Adventure Begins.mp4` and its matching
+`.nfo`. Season `0` is supported for specials. MP4, MKV, MOV, M4V, AVI, WebM, TS,
+and M2TS extensions are accepted; files are uploaded as-is without transcoding
+or checking codec compatibility. The local source is not deleted. Ensure enough
+share quota remains for the video.
+
+Keep `azure_files_media.py` alongside the two commands if copying the scripts
+elsewhere. Series titles also become folder names; titles and episode names must
+be plain filename components without slashes, reserved filename characters, or
+trailing spaces/periods. Metadata is XML-escaped automatically. Use `--help` on
+either command to see all options.
+
+Series creation refuses an existing directory. Episode uploads refuse reused
+season/episode numbers, even with different titles or extensions. An exclusive
+`.jellyfin-upload-lock` directory inside the series coordinates episode uploads
+from different computers using these scripts. Other upload tools do not honor
+that reservation: do not use them concurrently on the same series.
+
+**Do not scan or play a newly uploading episode until the command succeeds.**
+The NFO uploads first, followed by the video; files are visible while Azure CLI
+is uploading. Disable automatic/realtime scans during imports if enabled.
+After success, run **Scan Library Files** as described below.
+
+If an upload fails or is interrupted after transfer starts, its partial files
+and reservation are deliberately retained rather than risking deletion of
+existing data. Before retrying, ensure no upload is still running, inspect the
+series using an authorized Azure Files client, remove only that failed episode's
+partial video/NFO, and delete the empty `.jellyfin-upload-lock` directory. A
+failed series creation may similarly leave its new folder and partial
+`tvshow.nfo`; inspect and remove only that failed new series before retrying.
+Do not remove a reservation belonging to an active upload.
+
+For authorization errors, check your login, privileged file data role, RBAC
+propagation, and storage firewall independently. The commands always request
+OAuth login and do not fall back to account keys or SAS credentials.
+
+#### Configure the Jellyfin library
+
+As a Jellyfin administrator:
+
+1. Open **Dashboard → Libraries → Add Media Library**.
+2. Choose **Shows** as the content type and a name such as **D&D Sessions**.
+3. Add `/media` as the library folder. For an existing recordings library, check
+   that its content type is Shows; create a Shows library if needed.
+4. Disable online metadata downloaders and online image fetchers for this
+   private library. Leave local NFO metadata reading enabled.
+5. Save, then run **Scan Library Files** from the library menu.
+
+Jellyfin should display each campaign as a show with seasons and individual
+episodes. Check the first episode's title, description, date, and playback before
+uploading the rest of your collection.
+
+#### Update metadata later
+
+- For quick changes, open the show or episode menu and select **Edit metadata**.
+  Those edits are stored in Jellyfin's configuration database.
+- Maintain the NFO sidecars in Azure Files for portable metadata that survives
+  rebuilding the library. Jellyfin's read-only media mount cannot save NFO edits
+  back beside the videos, so web-interface edits do not update those sidecars.
+- After adding episodes, scan the library. After updating existing sidecars,
+  refresh metadata for the affected show or episode. Avoid replacing manually
+  edited metadata unless that is intended.
+
+#### Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Episodes appear as separate shows | Use a Shows library and keep all episodes inside the same campaign folder. |
+| Episodes are missing or misnumbered | Check `S01E01` naming, season folders, and unique episode numbers within each season. |
+| Descriptions are missing | Check that NFO filenames match the videos and that their XML is valid, then refresh metadata. |
+| Wrong title or artwork | Disable online providers and refresh from local metadata; check for locked or manually edited fields before replacing them. |
+| Nothing appears | Confirm files reached Azure Files, not Blob Storage, and verify the VM share is mounted using the startup checks above. Do not scan an unmounted share. |
+| Upload is denied | Check the upload client's write permissions and storage firewall access separately from the VM's playback identity. |
+
+References: [Jellyfin TV show naming](https://jellyfin.org/docs/general/server/media/shows/)
+and [Jellyfin NFO metadata](https://jellyfin.org/docs/general/server/metadata/nfo/).
 
 ### Backups, recovery and maintenance
 
@@ -563,6 +793,19 @@ credentials; deployment supports >= 1.9. Terraform validation
 and mocked plans do not deploy resources or prove that Azure bootstrap,
 certificate issuance, backup recovery, or player playback work. Perform the
 deployment acceptance checks above in your subscription.
+
+Azure Files media script regression tests use Python's standard-library unittest
+runner and mocked Azure CLI calls; no Azure credentials are needed:
+
+```bash
+python3 -m unittest discover \
+  -s /home/runner/work/dnd-session-server/dnd-session-server/scripts/tests -v
+```
+
+Substitute your checkout path as needed. These tests do not verify real Azure
+authentication, storage firewall access, share permissions, or Jellyfin playback;
+test both commands from your upload computer with a small recording before
+uploading large sessions.
 
 For the unchanged legacy deployment:
 
