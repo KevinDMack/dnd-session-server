@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Create a Jellyfin series on the VM's Azure Files share."""
+"""Create a Jellyfin series directly on Azure Files from your computer."""
 
 import argparse
 
-from vm_media import create_series, name, number, run, text
+from azure_files_media import create_series, name, number, run, storage_arguments, text
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    storage_arguments(parser)
     parser.add_argument("series", type=name, help="series title and folder name")
     parser.add_argument("--overview", type=text, help="campaign description")
     parser.add_argument("--year", type=number, help="starting year")

@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Copy a local VM video into an existing Jellyfin series on Azure Files."""
+"""Upload a local video to an existing Jellyfin series on Azure Files."""
 
 import argparse
 from pathlib import Path
 
-from vm_media import date, name, number, run, season_number, text, upload_episode
+from azure_files_media import (
+    date, name, number, run, season_number, storage_arguments, text, upload_episode,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    storage_arguments(parser)
     parser.add_argument("series", type=name, help="existing series folder name")
-    parser.add_argument("video", type=Path, help="local video file on the VM")
+    parser.add_argument("video", type=Path, help="local video file on your computer")
     parser.add_argument("--title", type=name, required=True)
     parser.add_argument("--season", type=season_number, required=True, help="0 for specials")
     parser.add_argument("--episode", type=number, required=True)
