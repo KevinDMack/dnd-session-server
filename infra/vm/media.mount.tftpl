@@ -1,0 +1,13 @@
+[Unit]
+Description=Read-only Azure Files SMB media (managed identity OAuth)
+Requires=jellyfin-media-auth.service
+After=network-online.target jellyfin-media-auth.service
+Before=jellyfin.service caddy.service
+
+[Mount]
+What=//${endpoint}/${share}
+Where=/srv/jellyfin/media
+Type=cifs
+# mount.cifs resolves azfilesuser to the package-created UID; never assume 1001.
+Options=_netdev,ro,username=${client_id},sec=krb5,cruid=azfilesuser,uid=1000,gid=1000,dir_mode=0755,file_mode=0644,serverino,nosharesock,mfsymlinks,actimeo=30,vers=3.1.1,seal,nodev,nosuid,noexec
+TimeoutSec=120

@@ -1,0 +1,12 @@
+[Unit]
+Description=Acquire Azure Files SMB OAuth credentials using managed identity
+Wants=network-online.target
+Requires=azfilesrefresh.service
+After=network-online.target azfilesrefresh.service
+Before=srv-jellyfin-media.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jellyfin-media-auth ${endpoint} ${client_id} ${share}
+RemainAfterExit=yes
+TimeoutStartSec=2700

@@ -1,0 +1,23 @@
+subscription_id      = "00000000-0000-0000-0000-000000000000"
+name_prefix          = "jellyfin"
+location             = "eastus"
+vm_size              = "Standard_B2s"
+admin_username       = "azureuser"
+ssh_public_key       = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY"
+administrator_cidr   = "203.0.113.10/32"
+domain_name          = "media.example.com"
+budget_contact_emails = ["you@example.com"]
+
+# Set this once to the current month's first day before your first apply.
+budget_start_date     = "2026-10-01T00:00:00Z"
+monthly_budget_amount = 100
+backup_retention_days = 30
+media_share_quota_gb  = 512
+os_disk_size_gb       = 64
+
+# Null defaults to administrator_cidr, protecting the first-run setup wizard.
+# After creating the Jellyfin administrator, permit additional trusted CIDRs
+# or use ["0.0.0.0/0"] for public application access.
+# Changing custom_data replaces the VM: update /etc/caddy/Caddyfile over SSH
+# and restart caddy for an existing VM instead of applying an allowlist change.
+https_allowed_cidrs = null

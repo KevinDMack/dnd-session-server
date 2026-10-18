@@ -2,14 +2,28 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Terraform: plan (infra)",
+      "name": "Terraform: plan recommended VM",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "terraform init && terraform plan",
+      "cwd": "${workspaceFolder}/infra/vm"
+    },
+    {
+      "name": "Terraform: apply recommended VM",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "terraform init && terraform apply",
+      "cwd": "${workspaceFolder}/infra/vm"
+    },
+    {
+      "name": "Terraform: plan legacy Container Apps (infra)",
       "type": "node-terminal",
       "request": "launch",
       "command": "terraform init && terraform plan",
       "cwd": "${workspaceFolder}/infra"
     },
     {
-      "name": "Terraform: apply (infra)",
+      "name": "Terraform: apply legacy Container Apps (infra)",
       "type": "node-terminal",
       "request": "launch",
       "command": "terraform init && terraform apply",

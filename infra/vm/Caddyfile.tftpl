@@ -1,0 +1,22 @@
+{
+	admin off
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+	}
+}
+
+${domain_name} {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	@allowed remote_ip ${https_cidrs}
+	handle @allowed {
+		reverse_proxy 127.0.0.1:8096
+	}
+	handle {
+		respond "Access restricted by administrator" 403
+	}
+}
