@@ -1,0 +1,28 @@
+# Authenticate separately using AWS SSO, a role, or AWS_PROFILE.
+region                = "us-east-1"
+name_prefix           = "jellyfin"
+administrator_cidr    = "203.0.113.10/32"
+domain_name           = "media.example.com"
+ssh_public_key        = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY"
+budget_contact_emails = ["admin@example.com"]
+monthly_budget_amount = 100
+
+# Null defaults Caddy application access to administrator_cidr.
+# Open access only AFTER completing Jellyfin's first-run setup:
+# https_allowed_cidrs = ["0.0.0.0/0"]
+
+os_disk_size_gb       = 64
+media_storage_type   = "ebs"
+media_volume_size_gb = 512
+
+# Alternative: encrypted regional EFS with a UID/GID 1000 access point.
+# media_storage_type = "efs"
+# efs_one_zone       = false
+# availability_zone  = "us-east-1a"
+
+backup_retention_days = 30
+
+# Destructive operations and backend switches are deliberately blocked by
+# prevent_destroy. VM termination is also disabled in EC2; root/config is
+# retained on termination. Plan migration/restore explicitly before changing
+# lifecycle guards. Budgets alert only; they do not stop resources or charges.

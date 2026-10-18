@@ -1,0 +1,11 @@
+[Unit]
+Description=Prepare Jellyfin media storage
+Wants=network-online.target
+After=network-online.target
+Before=srv-jellyfin-media.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jellyfin-prepare-media ${storage_type} ${volume_id} ${efs_dns}
+RemainAfterExit=yes
+TimeoutStartSec=1800

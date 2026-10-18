@@ -201,6 +201,156 @@ retire the old disk, explicitly detach it from the old VM after migration and
 backup verification, then delete it separately. Review this alongside any planned
 VM replacement; do not assume the old attachment is managed by this root anymore.
 
+## AWS alternative: EC2 with EBS or EFS
+
+The independent Terraform root at `infra/aws/` deploys the same single-server
+Jellyfin/Caddy design to AWS. It does not modify Azure resources or share their
+Terraform state. Defaults are Ubuntu 24.04, `t3.medium` in `us-east-1`, a 64 GiB
+encrypted gp3 root/configuration disk, and a separate 512 GiB encrypted gp3
+recordings disk. Both disks remain billable when the instance is stopped.
+The instance uses standard CPU credits: sustained CPU use is throttled rather
+than billed as surplus credits. This is intended for direct play, not demanding
+software transcoding.
+
+Set `media_storage_type = "efs"` for a separately managed NFS filesystem instead
+of an EBS media disk. Regional EFS is the default; the optional One Zone mode
+has lower cost but does not tolerate loss of its Availability Zone. EFS uses an
+access point, the EC2 IAM role, and encrypted TLS mounts; NFS is reachable only
+from the instance security group. The instance mounts EFS read-only and receives
+no media write permissions. EFS is billed for actual storage and throughput:
+the EBS capacity input does **not** impose an EFS quota or spending cap.
+Configuration/SQLite and Caddy certificates always stay on the EBS root disk.
+
+### Deploy on AWS
+
+Use Terraform >= 1.9 and < 2.0, AWS credentials for the destination account, a
+public SSH key, and a hostname you control. The deploying identity needs EC2,
+VPC, IAM/PassRole, Backup, Budgets, and (if selected) EFS permissions.
+Authenticate using your normal AWS profile/SSO workflow, not credentials in
+Terraform variables. Protect state and saved plans.
+
+```bash
+cp /home/runner/work/dnd-session-server/dnd-session-server/infra/aws/terraform.tfvars.example /home/runner/work/dnd-session-server/dnd-session-server/infra/aws/terraform.tfvars
+# Edit region, public SSH key, administrator CIDR, domain, and budget recipients.
+terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/aws init
+terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/aws fmt -check
+terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/aws validate
+terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/aws plan -out=tfplan
+terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/aws apply tfplan
+terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/aws output
+```
+
+For offline infrastructure regression checks, Terraform >= 1.12 can run
+`terraform -chdir=/home/runner/work/dnd-session-server/dnd-session-server/infra/aws test`
+after initialization. Tests use a mock AWS provider; they do not create resources
+or replace a real boot, backup, and restore test.
+
+Point your hostname's A record to the Elastic IP output and remove conflicting
+AAAA records. DNS hosting/domain registration is not provisioned; use your
+existing DNS provider. No load balancer or NAT gateway is needed.
+Only TCP 443 is public; TCP 22 is limited to the administrator CIDR. Do not open
+80, 8096, or NFS publicly. Caddy needs public 443 for TLS-ALPN certificate renewal
+even while its application allowlist is administrator-only.
+
+SSH as `ubuntu`, then check `sudo cloud-init status --wait`, `sudo systemctl --failed`,
+`sudo findmnt /srv/jellyfin/media`, and `sudo docker ps`. EBS bootstrap waits for
+the exact expected Nitro NVMe volume serial; only a signature-free,
+unpartitioned disk is initialized. Other filesystems/partition layouts require
+explicit migration and are never reformatted automatically.
+The optional EFS bootstrap installs AWS's supported pre-built `amazon-efs-utils`
+package using its HTTPS installer. This needs outbound access to
+`amazon-efs-utils.aws.com` and the installer's package endpoints. The vendor
+installer selects its supported package version; it is not an immutable build.
+Review and maintain that package independently of the pinned container images.
+
+Both containers require the media mount and stop when systemd deactivates it;
+they never intentionally serve an empty local fallback directory. This does
+not detect every remote-filesystem outage: an unreachable EFS server can leave
+NFS operations blocked. If initial IAM/DNS propagation or mounting fails, fix
+the cause, then use `sudo systemctl reset-failed` and
+`sudo systemctl start jellyfin.service caddy.service`. Never bypass mount checks.
+After reboot, verify the correct filesystem and representative playback again.
+
+Complete the setup wizard and create separate non-administrator player accounts
+before expanding `/etc/caddy/Caddyfile`'s `@allowed remote_ip` list over SSH.
+Restart `caddy.service` after changes; never broaden SSH. Configure Jellyfin's
+known reverse proxy to trust only the actual Caddy address/network.
+Bootstrap changes request instance replacement, blocked by `prevent_destroy`.
+Use deliberate runtime maintenance for existing instances, as with Azure;
+changing `https_allowed_cidrs` is not a live allowlist update mechanism.
+
+### Uploads, recovery, and migration
+
+- **EBS:** upload recordings/NFO sidecars as `ubuntu` over SSH/SFTP into
+  `/srv/jellyfin/media` only after verifying the mount. The host has write access;
+  Jellyfin's container bind mount is read-only.
+- **EFS:** use a separately authorized uploader inside the VPC with TLS, IAM
+  `ClientMount`/`ClientWrite` permissions, and its own access point rooted at
+  `/media` with UID/GID 1000. Update the filesystem resource policy explicitly
+  for that uploader; the playback role must remain read-only. This root does not
+  provision an upload host or expose NFS to the internet.
+- The Azure Blob upload script does not support either AWS destination.
+  Scan Jellyfin's library after copying and verifying the recording layout.
+- AWS Backup protects the instance/disks and independently selects media storage.
+  Daily backups retain recovery points for 30 days by default. Retained
+  snapshots/recovery points incur additional charges; separate EC2/EBS recovery
+  points can duplicate media protection. Budget emails at 80%/100% cover
+  **account-wide USD spending**, including unrelated AWS resources; they are
+  notifications, not a spending cap.
+- Trigger on-demand backups and confirm completed recovery points for both
+  configuration and recordings. Confirm AWS Backup's regional service opt-ins
+  include the selected resources. EFS data is not contained in an EC2 backup.
+  For a consistent SQLite recovery point, stop Jellyfin during the configuration
+  backup; scheduled live snapshots are not guaranteed application-consistent.
+- Test restore into an isolated instance with no public ingress using a service
+  role authorized for restore (the provisioned backup role is backup-only). Restore root
+  configuration/certificates and media separately, recreate attachments or EFS
+  mount targets/access points and IAM permissions, and update the expected
+  volume/filesystem IDs. Test mount ordering, login, playback progress, two
+  concurrent streams, and reboot before changing production DNS.
+- Migration is explicit: back up Azure, stop the old Jellyfin instance before
+  copying its database, use compatible Jellyfin versions, copy/verify media,
+  test the AWS server, then switch DNS. Azure continues billing until its
+  resources are explicitly retired. Never copy Azure state into the AWS root.
+- Instance, media, and backup destruction guards intentionally block routine
+  replacement/deletion. The root disk is retained on termination, but this is
+  not a backup. Export/test backups before a deliberate teardown; retained EBS,
+  EFS, Elastic IPs and recovery points continue billing. Never disable guards
+  merely to make a plan apply.
+
+### Estimated AWS monthly costs
+
+Planning estimates, **not live quotes**: N. Virginia, USD On-Demand Linux,
+730 hours/month, 512 GiB media, direct play; no free-tier credits or commitments.
+
+| Component | Approximate monthly cost |
+| --- | ---: |
+| `t3.medium` | $30.37 |
+| 64 GiB gp3 root/configuration | $5.12 |
+| 512 GiB gp3 media | $40.96 |
+| One public IPv4 address | $3.65 |
+| **Default total, before extras** | **$80.10** |
+| Optional external Route 53 hosted zone | $0.50 plus queries |
+
+With Route 53, the base is about **$80.60/month**. Replacing media EBS with EFS
+One Zone Standard at roughly $0.16/GiB-month gives **$121/month**, or Regional
+Standard at roughly $0.30/GiB-month gives **$193/month**, before throughput
+charges. EFS storage classes/lifecycle choices can change the bill considerably.
+
+All totals exclude backups, traffic, domains, taxes, and optional monitoring.
+Standard EBS snapshot storage is approximately $0.05/GB-month of stored snapshot
+data; snapshots are incremental, not 30 complete copies for 30 daily backups.
+Assuming the account's first 100 GB/month internet-egress allowance is available,
+then approximately $0.09/GB: 100/500/1,000 GB outbound costs about $0/$36/$81.
+Stopping EC2 stops compute charges, not storage, backups, or Elastic IP charges.
+
+Confirm current regional prices in the [AWS calculator](https://calculator.aws/),
+[EC2 pricing](https://aws.amazon.com/ec2/pricing/on-demand/),
+[EBS pricing](https://aws.amazon.com/ebs/pricing/),
+[EFS pricing](https://aws.amazon.com/efs/pricing/),
+[VPC pricing](https://aws.amazon.com/vpc/pricing/), and
+[AWS Backup pricing](https://aws.amazon.com/backup/pricing/).
+
 ## Monthly Azure cost comparison
 
 Planning assumptions: East US, USD pay-as-you-go, 730 hours/month, approximately

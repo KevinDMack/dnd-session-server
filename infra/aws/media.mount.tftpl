@@ -1,0 +1,12 @@
+[Unit]
+Description=Jellyfin media storage
+Wants=network-online.target
+Requires=jellyfin-prepare-media.service
+After=network-online.target jellyfin-prepare-media.service
+
+[Mount]
+What=${source}
+Where=/srv/jellyfin/media
+Type=${fs_type}
+Options=${options}
+TimeoutSec=300
