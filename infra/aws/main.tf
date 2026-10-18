@@ -41,7 +41,7 @@ resource "aws_subnet" "jellyfin" {
   vpc_id                  = aws_vpc.jellyfin.id
   cidr_block              = "10.42.1.0/24"
   availability_zone       = local.availability_zone
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = false
   tags                    = { Name = "${var.name_prefix}-public" }
 }
 
@@ -115,18 +115,25 @@ resource "aws_iam_instance_profile" "jellyfin" {
   role        = aws_iam_role.jellyfin.name
 }
 
+resource "aws_network_interface" "jellyfin" {
+  subnet_id       = aws_subnet.jellyfin.id
+  security_groups = [aws_security_group.jellyfin.id]
+  tags            = { Name = var.name_prefix }
+}
+
 resource "aws_instance" "jellyfin" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = "t3.medium"
-  subnet_id                   = aws_subnet.jellyfin.id
   availability_zone           = local.availability_zone
-  vpc_security_group_ids      = [aws_security_group.jellyfin.id]
-  associate_public_ip_address = true
   key_name                    = aws_key_pair.administrator.key_name
   iam_instance_profile        = aws_iam_instance_profile.jellyfin.name
   disable_api_termination     = true
   user_data                   = local.cloud_init
   user_data_replace_on_change = true
+
+  primary_network_interface {
+    network_interface_id = aws_network_interface.jellyfin.id
+  }
 
   metadata_options {
     http_endpoint               = "enabled"
@@ -157,6 +164,7 @@ resource "aws_instance" "jellyfin" {
   # EBS attachment necessarily follows instance creation; bootstrap retries it.
   depends_on = [
     aws_route_table_association.jellyfin,
+    aws_eip_association.jellyfin,
     aws_vpc_security_group_egress_rule.jellyfin,
     aws_efs_mount_target.media,
     aws_efs_file_system_policy.media,
@@ -171,6 +179,6 @@ resource "aws_eip" "jellyfin" {
 }
 
 resource "aws_eip_association" "jellyfin" {
-  allocation_id = aws_eip.jellyfin.id
-  instance_id   = aws_instance.jellyfin.id
+  allocation_id        = aws_eip.jellyfin.id
+  network_interface_id = aws_network_interface.jellyfin.id
 }

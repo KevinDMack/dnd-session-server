@@ -20,6 +20,9 @@ mock_provider "aws" {
   mock_resource "aws_iam_instance_profile" {
     defaults = { name = "jellyfin-profile" }
   }
+  mock_resource "aws_network_interface" {
+    defaults = { id = "eni-0123456789abcdef0" }
+  }
   mock_resource "aws_security_group" {
     defaults = { id = "sg-0123456789abcdef0" }
   }
@@ -97,8 +100,8 @@ run "ebs_defaults" {
     error_message = "Only administrator SSH and public TLS-ALPN are exposed; application access defaults to the administrator."
   }
   assert {
-    condition     = aws_eip.jellyfin.domain == "vpc" && aws_eip_association.jellyfin.instance_id == aws_instance.jellyfin.id && aws_instance.jellyfin.associate_public_ip_address && aws_subnet.jellyfin.map_public_ip_on_launch && aws_vpc.jellyfin.enable_dns_support && aws_vpc.jellyfin.enable_dns_hostnames && strcontains(file("${path.module}/main.tf"), "aws_route_table_association.jellyfin,")
-    error_message = "Provide initial public connectivity before EIP association, with the subnet route ready before boot."
+    condition     = aws_eip.jellyfin.domain == "vpc" && aws_eip_association.jellyfin.network_interface_id == aws_network_interface.jellyfin.id && aws_instance.jellyfin.primary_network_interface[0].network_interface_id == aws_network_interface.jellyfin.id && !aws_subnet.jellyfin.map_public_ip_on_launch && aws_network_interface.jellyfin.security_groups == toset([aws_security_group.jellyfin.id]) && aws_vpc.jellyfin.enable_dns_support && aws_vpc.jellyfin.enable_dns_hostnames && strcontains(file("${path.module}/main.tf"), "aws_route_table_association.jellyfin,") && strcontains(file("${path.module}/main.tf"), "aws_eip_association.jellyfin,")
+    error_message = "Bind the primary ENI's EIP and ready the subnet route before boot, without ephemeral public IPs or interrupted apt connectivity."
   }
   assert {
     condition     = one(aws_backup_plan.jellyfin.rule).schedule == "cron(0 3 * * ? *)" && one(one(aws_backup_plan.jellyfin.rule).lifecycle).delete_after == 30 && toset(aws_backup_selection.jellyfin.resources) == toset([aws_instance.jellyfin.arn, aws_ebs_volume.media[0].arn]) && !aws_backup_vault.jellyfin.force_destroy
@@ -117,7 +120,7 @@ run "ebs_defaults" {
     error_message = "VM, both media backends/access point and backup vault/plan/selection need destruction guards; ignore incidental AMI refreshes."
   }
   assert {
-    condition     = length(local.cloud_init) <= 16384 && length(yamldecode(local.cloud_init).write_files) == 7 && alltrue([for entry in yamldecode(local.cloud_init).write_files : entry.encoding == "b64" && can(base64decode(entry.content))]) && yamldecode(local.cloud_init).package_update && !yamldecode(local.cloud_init).ssh_pwauth && yamldecode(local.cloud_init).disable_root
+    condition     = length(base64encode(local.cloud_init)) / 4 * 3 - length(regexall("=", base64encode(local.cloud_init))) <= 16384 && length(yamldecode(local.cloud_init).write_files) == 7 && alltrue([for entry in yamldecode(local.cloud_init).write_files : entry.encoding == "b64" && can(base64decode(entry.content))]) && yamldecode(local.cloud_init).package_update && !yamldecode(local.cloud_init).ssh_pwauth && yamldecode(local.cloud_init).disable_root
     error_message = "Render valid, key-only cloud-init with base64 file payloads within EC2's 16 KiB user-data limit."
   }
   assert {
@@ -125,7 +128,11 @@ run "ebs_defaults" {
     error_message = "EBS bootstrap must select the independently attached disk by its stable volume ID, not enumeration."
   }
   assert {
-    condition     = strcontains(file("${path.module}/prepare-media.sh"), "attempt <= 120") && strcontains(file("${path.module}/prepare-media.sh"), "wipefs --no-act") && strcontains(file("${path.module}/prepare-media.sh"), "refusing initialization") && strcontains(file("${path.module}/prepare-media.sh"), "refusing to modify existing data") && strcontains(file("${path.module}/prepare-media.sh"), "udevadm settle")
+    condition     = strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/srv-jellyfin-media.mount"])), "Type=ext4") && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/srv-jellyfin-media.mount"])), "Options=defaults,nodev,nosuid,noexec")
+    error_message = "EBS must render an ext4 mount with hardened options, not an EFS mount."
+  }
+  assert {
+    condition     = strcontains(file("${path.module}/prepare-media.sh"), "attempt <= 120") && strcontains(file("${path.module}/prepare-media.sh"), "lsblk --nodeps --noheadings --paths --output NAME,SERIAL") && strcontains(file("${path.module}/prepare-media.sh"), "$2 == serial") && strcontains(file("${path.module}/prepare-media.sh"), "wipefs --no-act") && strcontains(file("${path.module}/prepare-media.sh"), "refusing initialization") && strcontains(file("${path.module}/prepare-media.sh"), "refusing to modify existing data") && strcontains(file("${path.module}/prepare-media.sh"), "udevadm settle")
     error_message = "EBS preparation must wait for attachment and refuse to format disks with existing/unknown signatures."
   }
   assert {
@@ -168,8 +175,12 @@ run "regional_efs" {
     error_message = "EFS backups must explicitly protect EC2/config and the filesystem."
   }
   assert {
-    condition     = length(local.cloud_init) <= 16384 && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/srv-jellyfin-media.mount"])), "Options=_netdev,ro,tls,iam,accesspoint=fsap-0123456789abcdef0") && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/jellyfin-prepare-media.service"])), "efs none fs-0123456789abcdef0.efs.us-east-1.amazonaws.com")
+    condition     = length(base64encode(local.cloud_init)) / 4 * 3 - length(regexall("=", base64encode(local.cloud_init))) <= 16384 && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/srv-jellyfin-media.mount"])), "Options=_netdev,ro,tls,iam,accesspoint=fsap-0123456789abcdef0") && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/jellyfin-prepare-media.service"])), "efs none fs-0123456789abcdef0.efs.us-east-1.amazonaws.com")
     error_message = "EFS cloud-init must render TLS/IAM/access-point read-only mounts and wait for mount-target DNS."
+  }
+  assert {
+    condition     = length(yamldecode(local.cloud_init).write_files) == 7 && alltrue([for entry in yamldecode(local.cloud_init).write_files : entry.encoding == "b64" && can(base64decode(entry.content))]) && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/srv-jellyfin-media.mount"])), "What=fs-0123456789abcdef0:/") && strcontains(base64decode(one([for entry in yamldecode(local.cloud_init).write_files : entry.content if entry.path == "/etc/systemd/system/srv-jellyfin-media.mount"])), "Type=efs")
+    error_message = "EFS cloud-init must decode all base64 file payloads and select the EFS source and mount helper."
   }
   assert {
     condition     = length(jsondecode(aws_iam_role_policy.media[0].policy).Statement[0].Action) == 1 && contains(jsondecode(aws_iam_role_policy.media[0].policy).Statement[0].Action, "elasticfilesystem:ClientMount") && length(jsondecode(aws_efs_file_system_policy.media[0].policy).Statement[0].Action) == 1 && contains(jsondecode(aws_efs_file_system_policy.media[0].policy).Statement[0].Action, "elasticfilesystem:ClientMount")
